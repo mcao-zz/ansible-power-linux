@@ -1,0 +1,118 @@
+- name: install development tools package group
+  yum: name="@Development tools" state=present update_cache=yes
+
+- name: install kernel dev packages
+  yum:
+    name: ['ncurses-devel', 'bc', 'openssl-devel', 'hmaccalc', 'zlib-devel', 'binutils-devel', 'elfutils-libelf-devel']
+    state: present
+
+- name: check whether kernel available
+  stat:
+    path: /tmp/kernel-download/
+  register: stat_result
+
+- name: delete kernel directory if exists
+  file:
+    path: /tmp/kernel-download
+    state: absent
+  when: stat_result.stat.exists
+
+- name: cloning "{{ kernelrepo }}"
+  git:
+    repo: "{{ kernelrepo }}"
+    dest: /tmp/kernel-download
+    update: yes
+    version: master
+  when: kernelrepo is defined
+
+- name: cloning net-next
+  git:
+    repo: https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net-next.git
+    dest: /tmp/kernel-download
+    update: yes
+    version: master
+    depth: 1
+  when: kernelrepo is not defined
+
+- name: copy kernel config file for make from local
+  copy:
+    src: /root/ci_workspace/linux_configs/linux_dot_config
+    dest: /tmp/kernel-download/.config
+
+- name: create patch directory
+  file:
+    path: /tmp/kernel-download/patches
+    state: directory
+  when: patches is defined
+
+- name: copy over specified patch file(s)
+  copy:
+    src: "{{ item }}"
+    dest: /tmp/kernel-download/patches
+  with_items: "{{ patches }}"
+  when: patches is defined
+
+- name: copy over all patch files from default directory
+  copy:
+    src: /root/ci_workspace/patches/
+    dest: /tmp/kernel-download/patches
+  when: allpatches is defined and allpatches == ""
+
+- name: copy over all patch files from user specified directory
+  copy:
+    src: "{{ allpatches }}"
+    dest: /tmp/kernel-download/patches
+  when: allpatches is defined and allpatches != ""
+
+- name: find patch files
+  find:
+    paths: /tmp/kernel-download/patches
+    patterns: "*.patch"
+  register: patch_files
+  when: patches is defined or allpatches is defined
+
+- name: apply optional patch file(s)
+  shell: "git apply {{ item }}"
+  with_items: "{{ patch_files.files | map(attribute='path') | list }}"
+  when: patches is defined or allpatches is defined
+  args:
+    chdir: /tmp/kernel-download
+
+- name: install kernel
+  shell: "{{ item }}"
+  with_items:
+  - make olddefconfig
+  - make -j 20
+  - make modules
+  - make modules_install
+  - make install
+  register: out
+  args:
+    chdir: /tmp/kernel-download
+
+- name: print output
+  debug: var=out.stdout_lines
+
+- name: update grub
+  shell: "{{ item }}"
+  with_items:
+  - grubby --set-default /boot/vmlinuz-`cat include/config/kernel.release 2> /dev/null`
+  - grub2-mkconfig --output=/boot/grub2/grub.cfg
+  args:
+    chdir: /tmp/kernel-download
+
+- name: reboot machine
+  reboot:
+    reboot_timeout: 3600
+
+- name: copying validate_version script
+  ansible.builtin.copy:
+    src: /root/ci_workspace/validate_version.py
+    dest: /root/validate_version.py
+
+- name: confirm kernel version
+  shell: python /root/validate_version.py
+  register: result
+
+- name: check output
+  debug: var=result.stdout
